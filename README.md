@@ -235,5 +235,7 @@ interface GentidAuthOptions {
 
 - [GentID Documentation](https://gentid.com/docs)
 - [Dashboard → Integrations](https://gentid.com/dashboard/integrations)
+- [npm — @gentid/auth](https://www.npmjs.com/package/@gentid/auth)
+- [GitHub — gentid-auth](https://github.com/010101G/gentid-auth)
 - [npm — @gentid/sdk](https://www.npmjs.com/package/@gentid/sdk)
 - [GitHub — gentid-sdk](https://github.com/010101G/gentid-sdk)

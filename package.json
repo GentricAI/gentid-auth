@@ -1,6 +1,6 @@
 {
   "name": "@gentid/auth",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "GentID Agent Gateway — Express, Next.js, and Cloudflare Worker middleware for AI agent authentication",
   "license": "MIT",
   "homepage": "https://gentid.com",
