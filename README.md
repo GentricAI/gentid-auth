@@ -1,21 +1,28 @@
 # @gentid/auth
 
-Express, Next.js, and Cloudflare Worker middleware for [GentID](https://gentid.com) — the trust infrastructure layer for AI agents.
+Express, Next.js, and Cloudflare Worker middleware for [GentID](https://gentid.com), the open
+identity protocol for AI agents.
 
-Add AI agent support to any Node.js backend in one line. Verify agent identity, read scoped permissions, and know exactly who is acting on whose behalf.
+Accept verified AI agents from any organization in one line. Verification runs against the
+**agent's own domain** with pure cryptography: the middleware resolves the issuing domain's
+anchors from DNS and its signed `.well-known` document, then checks the certificate chain
+locally. There is no central registry and no per-request call to any GentID service.
 
 [![npm version](https://img.shields.io/npm/v/@gentid/auth.svg)](https://www.npmjs.com/package/@gentid/auth)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 ## How it works
 
-1. Your AI agent fetches a signed JWT from GentID using `@gentid/sdk`
-2. The agent sends it in the `Authorization: GentID <token>` header
-3. `@gentid/auth` verifies it against the GentID API and populates `req.agent`
-4. Your handler reads the verified identity and permissions — no shared secrets, no config
+1. An agent attaches two headers to its request: `GentID-Envelope` (a signed, timestamped,
+   nonced wrapper bound to the request body) and `GentID-Bundle` (its certificate chain).
+2. The middleware resolves the agent's domain anchors (DNS TXT plus signed
+   `/.well-known/gentid.json`, cached per TTL) via `@gentid/resolver`.
+3. `@gentid/core`'s `verifyChain` checks the chain: signatures, validity windows, monotonic
+   narrowing of scopes and spending ceilings, and revocation.
+4. Your handler reads `req.gentid`. No shared secrets, no API keys, no phone-home.
 
 ```
-Agent → Authorization: GentID <token> → @gentid/auth → req.agent → your handler
+Agent → GentID-Envelope + GentID-Bundle → @gentid/auth → req.gentid → your handler
 ```
 
 ## Installation
@@ -24,218 +31,84 @@ Agent → Authorization: GentID <token> → @gentid/auth → req.agent → your 
 npm install @gentid/auth
 ```
 
-Requires Node.js 18+. Peer dependencies: `express ≥ 4` or `next ≥ 13` depending on which integration you use.
+Requires Node.js 20+ (WebCrypto Ed25519). Works in edge runtimes.
 
----
+## Express
 
-## Express / Node.js
-
-```typescript
+```ts
 import express from 'express';
 import { gentidAuth } from '@gentid/auth/express';
 
 const app = express();
 
-// Protect all /api routes — 401 if no valid GentID token
+// Capture the raw body so the envelope's payload hash can be checked.
+app.use(express.json({ verify: (req, _res, buf) => { (req as any).rawBody = buf; } }));
+
 app.use('/api', gentidAuth());
 
-app.post('/api/book-flight', (req, res) => {
-  const { agentId, agentName, owner, permissions } = req.agent!;
-  //    agentId     — "gentic:agent:a3f9d2..."
-  //    agentName   — "grack-assistant"
-  //    owner       — "acme-corp"
-  //    permissions — { travel_booking: true, max_transaction_usd: 1500 }
-
-  res.json({ confirmed: true, bookedBy: agentName });
+app.post('/api/book', (req, res) => {
+  const { id, domain, grants, assurance } = req.gentid!;
+  // id        → "gentic:agent:delta.com:ops:rebooker-7"
+  // domain    → "delta.com" (the trust anchor, from the agent's own DNS)
+  // grants    → effective scopes and mandateCeiling after chain narrowing
+  // assurance → 1 domain-verified, 2 org-verified, 3 transaction-proven
+  res.json({ ok: true, bookedBy: id });
 });
 ```
 
-### Optional — allow both humans and agents
+For money-moving routes, force strict revocation freshness. Stale or unknown revocation state
+then becomes a hard deny, and there is deliberately no option to bypass it:
 
-```typescript
-// required: false — non-agent requests pass through, req.agent is undefined
-app.use('/api', gentidAuth({ required: false }));
-
-app.get('/api/search', (req, res) => {
-  if (req.agent) {
-    // AI agent request
-  } else {
-    // Regular human/app request
-  }
-});
+```ts
+app.use('/api/payments', gentidAuth({ operationClass: 'financial' }));
 ```
 
-### TypeScript — type `req.agent` project-wide
+## Mandates and HTTP 402
 
-Add this once to your project:
+If a request carries a spending mandate, it is verified against the chain's ceilings and the
+issuing org's designated enforcers, and exposed as `req.gentid.mandate`.
 
-```typescript
-// global.d.ts
-import type { AgentContext } from '@gentid/auth/express';
-declare module 'express-serve-static-core' {
-  interface Request { agent?: AgentContext; }
-}
+**Verified is not the same as enforceable.** Verification proves the mandate is authentic:
+really issued, within its chain's ceilings, unexpired, unrevoked. Whether funds exist and
+budgets have room is the job of the settlement institution named in the mandate. GentID never
+holds balances.
+
+Server side, charge for an action:
+
+```ts
+import { paymentRequiredHeaders } from '@gentid/auth';
+
+res.status(402).set(paymentRequiredHeaders({
+  amount: 12.5, currency: 'USD',
+  payee: 'acme-travel.com',
+  enforcersAccepted: ['atheries.com'],
+}));
 ```
 
----
+Client side, complete the escrow-then-retry flow with any enforcer implementing the neutral
+`MandateEnforcerClient` interface:
 
-## Next.js (App Router)
+```ts
+import { fetchWith402 } from '@gentid/auth';
 
-### Route handler wrapper
-
-```typescript
-// app/api/book/route.ts
-import { withGentidAuth } from '@gentid/auth/next';
-
-export const POST = withGentidAuth(async (req, agent) => {
-  return Response.json({
-    confirmed: true,
-    bookedBy:  agent.agentName,
-    allowed:   agent.permissions['travel_booking'] === true,
-  });
-});
-
-// Optional — allow non-agent requests
-export const GET = withGentidAuth(async (req, agent) => {
-  if (agent) return Response.json({ mode: 'agent', name: agent.agentName });
-  return Response.json({ mode: 'human' });
-}, { required: false });
+const resp = await fetchWith402(request, { mandate, enforcers, reference: envelope.id });
 ```
 
-### middleware.ts — protect entire route groups
+## Legacy tokens (v1 compatibility)
 
-```typescript
-// middleware.ts
-import { createGentidMiddleware } from '@gentid/auth/next';
+Requests without protocol headers fall back to the registry-era token path
+(`Authorization: GentID <token>` or `X-GentID-Token`), verified against the issuing instance's
+published JWKS and exposed as `req.agent`. Existing v1 integrations keep working unchanged
+through the migration window. See the
+[migration guide](https://gentid.com/docs#migration).
 
-export default createGentidMiddleware({ required: true });
+## Also in this family
 
-export const config = {
-  matcher: '/api/agent/:path*',
-};
-```
+- [`@gentid/core`](https://github.com/gentricai/gentid-core): the protocol standard as a
+  library. Pure verification, zero dependencies.
+- [`@gentid/node`](https://github.com/gentricai/gentid-node): become an issuer for your own
+  domain in about 15 minutes.
+- [Protocol specification](https://gentid.com/spec) and
+  [conformance test vectors](https://github.com/010101G/gentid/tree/main/spec/test-vectors).
 
-Read the agent in downstream route handlers:
-
-```typescript
-// app/api/agent/action/route.ts
-import { getAgentFromHeaders } from '@gentid/auth/next';
-import { type NextRequest, NextResponse } from 'next/server';
-
-export async function POST(req: NextRequest) {
-  const agent = getAgentFromHeaders(req.headers);
-  if (!agent) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-
-  return NextResponse.json({ agent });
-}
-```
-
----
-
-## Cloudflare Worker
-
-```typescript
-// worker.ts
-import { withGentidAuth } from '@gentid/auth/cloudflare';
-
-interface Env {
-  GENTID_API_URL?: string;
-}
-
-export default {
-  fetch: withGentidAuth<Env>(
-    async (request, agent, env, ctx) => {
-      return Response.json({
-        agent:       agent.agentName,
-        owner:       agent.owner,
-        permissions: agent.permissions,
-      });
-    },
-    { required: true },
-  ),
-};
-```
-
----
-
-## Token flow (agent side)
-
-Your agent fetches a token using [`@gentid/sdk`](https://www.npmjs.com/package/@gentid/sdk) and attaches it to every outgoing request:
-
-```typescript
-import { GentIDClient } from '@gentid/sdk';
-
-const gentid = new GentIDClient({ apiKey: process.env.GENTID_API_KEY! });
-
-// Get a short-lived signed permission token (1 hour TTL)
-const { token } = await gentid.getToken(agentId);
-
-// Attach to every outgoing request
-const response = await fetch('https://yoursite.com/api/book-flight', {
-  method: 'POST',
-  headers: {
-    'Authorization': `GentID ${token}`,
-    'Content-Type': 'application/json',
-  },
-  body: JSON.stringify({ from: 'JFK', to: 'SFO' }),
-});
-```
-
-The token header is also accepted as `X-GentID-Token` for environments where `Authorization` is reserved.
-
----
-
-## AgentContext shape
-
-After verification, the agent context contains:
-
-```typescript
-interface AgentContext {
-  agentId:     string;                    // "gentic:agent:a3f9d2c1e8b4"
-  agentName:   string;                    // "grack-assistant"
-  owner:       string;                    // "acme-corp"
-  status:      string;                    // "active"
-  permissions: Record<string, unknown>;   // { travel_booking: true, max_transaction_usd: 1500 }
-  issuedAt:    string;                    // ISO 8601
-  expiresAt:   string;                    // ISO 8601
-}
-```
-
----
-
-## Options
-
-```typescript
-interface GentidAuthOptions {
-  /** Override the GentID API base URL. Defaults to https://api.gentid.com */
-  apiUrl?: string;
-
-  /**
-   * If true (default), requests without a valid GentID token are rejected with 401.
-   * If false, non-agent requests pass through — check req.agent to distinguish.
-   */
-  required?: boolean;
-}
-```
-
----
-
-## Exports
-
-| Import path | Use for |
-|---|---|
-| `@gentid/auth` | Core types and `verifyGentidToken` utility |
-| `@gentid/auth/express` | Express / Node.js middleware |
-| `@gentid/auth/next` | Next.js route handlers and middleware.ts |
-| `@gentid/auth/cloudflare` | Cloudflare Workers |
-
----
-
-## Links
-
-- [GentID Documentation](https://gentid.com/docs)
-- [Dashboard → Integrations](https://gentid.com/dashboard/integrations)
-- [npm — @gentid/auth](https://www.npmjs.com/package/@gentid/auth)
-- [GitHub — gentid-auth](https://github.com/010101G/gentid-auth)
-- [npm — @gentid/sdk](https://www.npmjs.com/package/@gentid/sdk)
-- [GitHub — gentid-sdk](https://github.com/010101G/gentid-sdk)
+MIT.
