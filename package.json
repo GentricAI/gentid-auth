@@ -1,12 +1,13 @@
 {
   "name": "@gentid/auth",
-  "version": "1.0.1",
-  "description": "GentID Agent Gateway — Express, Next.js, and Cloudflare Worker middleware for AI agent authentication",
+  "version": "2.0.0-alpha.1",
+  "description": "GentID Agent Gateway - Express, Next.js, and Cloudflare Worker middleware for AI agent authentication",
   "license": "MIT",
+  "author": "Gentric AI",
   "homepage": "https://gentid.com",
   "repository": {
     "type": "git",
-    "url": "https://github.com/010101G/gentid-auth.git"
+    "url": "https://github.com/gentricai/gentid-auth.git"
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -43,19 +44,33 @@
     "ai",
     "autonomous-agent"
   ],
-  "files": ["dist"],
-  "engines": { "node": ">=18" },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@gentid/protocol": "file:../gentid-protocol",
+    "jose": "^6.2.3",
+    "@gentid/core": "file:../gentid-core",
+    "@gentid/resolver": "file:../gentid-resolver"
   },
   "peerDependencies": {
     "express": ">=4",
     "next": ">=13"
   },
   "peerDependenciesMeta": {
-    "express": { "optional": true },
-    "next": { "optional": true }
+    "express": {
+      "optional": true
+    },
+    "next": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
